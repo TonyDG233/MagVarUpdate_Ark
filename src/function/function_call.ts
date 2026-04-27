@@ -11,8 +11,148 @@ import { parseString } from '@util/common';
  * 目前的折衷方式是在 generate 中触发函数调用，在这个情况下可以利用 required 肘掉正文的特性，来精简输出。
  */
 
-export const MVU_FUNCTION_NAME = 'mvu_VariableUpdate';
+export const MVU_FUNCTION_NAME = `mvu_VariableUpdate_${getScriptId()}`;
 const mvu_update_call_function_name = 'mvu_updateRound';
+
+const mvu_update_schema = Object.freeze({
+    $schema: 'http://json-schema.org/draft-04/schema#',
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        analysis: {
+            type: 'string',
+            minLength: 1,
+            description:
+                'Write in ENGLISH. A compact reasoning summary that includes: (1) calculate time passed; (2) decide whether dramatic updates are allowed (special case or sufficiently long time); (3) list every variable name BEFORE actual variable analysis, without revealing their contents; (4) for each variable, judge whether it satisfies its change conditions and output only Y/N without reasons; (5) only evaluate stories inside <past_observe> block.',
+        },
+        delta: {
+            type: 'string',
+            minLength: 0,
+            description: 'variable update block',
+        },
+    },
+    required: ['delta'],
+});
+
+const json_primitive_value_schemas = [
+    { type: 'string' },
+    { type: 'number' },
+    { type: 'integer' },
+    { type: 'boolean' },
+    { type: 'null' },
+];
+
+const json_array_item_schema = {
+    anyOf: [...json_primitive_value_schemas, { type: 'object' }, { type: 'array' }],
+};
+
+const json_value_schema = {
+    anyOf: [
+        ...json_primitive_value_schemas,
+        { type: 'object' },
+        {
+            type: 'array',
+            items: json_array_item_schema,
+        },
+    ],
+};
+
+const json_patch_operation_schema = {
+    anyOf: [
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['replace'] },
+                path: { type: 'string' },
+                value: json_value_schema,
+            },
+            required: ['op', 'path', 'value'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['delta'] },
+                path: { type: 'string' },
+                value: { type: 'number' },
+            },
+            required: ['op', 'path', 'value'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['insert', 'add'] },
+                path: { type: 'string' },
+                value: json_value_schema,
+            },
+            required: ['op', 'path', 'value'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['remove'] },
+                path: { type: 'string' },
+            },
+            required: ['op', 'path'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['move'] },
+                from: { type: 'string' },
+                path: { type: 'string' },
+            },
+            required: ['op', 'from', 'path'],
+        },
+        {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                op: { type: 'string', enum: ['move'] },
+                from: { type: 'string' },
+                to: { type: 'string' },
+            },
+            required: ['op', 'from', 'to'],
+        },
+    ],
+};
+
+export const MVU_JSON_PATCH_RESPONSE_SCHEMA = Object.freeze({
+    name: 'mvu_json_patch',
+    description: 'MVU JsonPatch dialect response. Return analysis plus json_patch operations only.',
+    strict: false,
+    value: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+            analysis: {
+                type: 'string',
+                description:
+                    'Write in ENGLISH. Compactly summarize the variable update decision without revealing variable contents.',
+            },
+            json_patch: {
+                type: 'array',
+                description:
+                    'MVU JsonPatch dialect operations. Use replace, delta, insert/add, remove, or move with JSON Pointer paths.',
+                items: json_patch_operation_schema,
+            },
+        },
+        required: ['analysis', 'json_patch'],
+    },
+}) satisfies JsonSchema;
+
+export const MVU_TOOL_DEFINITION = Object.freeze({
+    type: 'function',
+    function: {
+        name: MVU_FUNCTION_NAME,
+        description: 'use this tool to UpdateVariable.',
+        parameters: mvu_update_schema,
+    },
+}) satisfies ToolDefinition;
 
 /*
     e.g.: [
@@ -43,7 +183,7 @@ interface FunctionCallBody {
 
 /** 单个工具调用（function-calling 形态） */
 interface ToolFunctionCall {
-    index: number; // 这条 tool_call 在“本批次”中的顺序
+    index?: number; // 这条 tool_call 在“本批次”中的顺序
     id: string; // 流式/合并用的临时 ID
     type: 'function'; // 本题场景锁定 function；留扩展点以兼容其它类型
     function: FunctionCallBody;
@@ -135,26 +275,6 @@ export function registerFunction() {
         return () => {};
     }
 
-    const mvu_update_schema = Object.freeze({
-        $schema: 'http://json-schema.org/draft-04/schema#',
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-            analysis: {
-                type: 'string',
-                minLength: 1,
-                description:
-                    'Write in ENGLISH. A compact reasoning summary that includes: (1) calculate time passed; (2) decide whether dramatic updates are allowed (special case or sufficiently long time); (3) list every variable name BEFORE actual variable analysis, without revealing their contents; (4) for each variable, judge whether it satisfies its change conditions and output only Y/N without reasons; (5) only evaluate stories inside <past_observe> block.',
-            },
-            delta: {
-                type: 'string',
-                minLength: 0,
-                description: 'variable update block',
-            },
-        },
-        required: ['delta'],
-    });
-
     registerFunctionTool({
         name: MVU_FUNCTION_NAME,
         displayName: 'MVU update',
@@ -163,10 +283,10 @@ export function registerFunction() {
         parameters: mvu_update_schema,
         shouldRegister: () => {
             const store = useDataStore();
-            if (!store.runtimes.is_function_call_enabled) {
+            if (!store.should_enable || !store.runtimes.is_function_call_enabled) {
                 return false;
             }
-            return store.settings.额外模型解析配置.使用函数调用;
+            return store.settings.额外模型解析配置.应答格式 === '工具调用';
         },
         action: onVariableUpdatedCall,
         formatMessage: () => '',
@@ -220,7 +340,7 @@ export function overrideToolRequest(generate_data: any) {
     const store = useDataStore();
     if (
         store.settings.更新方式 !== '额外模型解析' ||
-        store.settings.额外模型解析配置.使用函数调用 !== true
+        store.settings.额外模型解析配置.应答格式 !== '工具调用'
     ) {
         return;
     }
@@ -245,6 +365,58 @@ export function overrideToolRequest(generate_data: any) {
         */
         generate_data.tool_choice = 'required';
     }
+}
+
+function stripOuterTagBlock(input: string, tagPattern: string): string {
+    const match = input.match(
+        new RegExp(`^\\s*<${tagPattern}>\\s*([\\s\\S]*?)\\s*</${tagPattern}>\\s*$`, 'i')
+    );
+    return match?.[1]?.trim() ?? input.trim();
+}
+
+function stripLeadingTagBlock(input: string, tagPattern: string): string {
+    const match = input.match(
+        new RegExp(`^\\s*<${tagPattern}>\\s*[\\s\\S]*?\\s*</${tagPattern}>\\s*`, 'i')
+    );
+    return match ? input.slice(match[0].length).trim() : input.trim();
+}
+
+function cleanStructuredPayload(input: string): string {
+    return input.replaceAll(/```.*/gm, '').trim();
+}
+
+function normalizeJsonPatchPayload(input: unknown): string | null {
+    if (isJsonPatch(input)) {
+        return JSON.stringify(input, null, 2);
+    }
+    if (typeof input !== 'string') {
+        return null;
+    }
+
+    let input_str = cleanStructuredPayload(input);
+    input_str = stripOuterTagBlock(input_str, 'UpdateVariable');
+    input_str = stripLeadingTagBlock(input_str, 'Analysis');
+    input_str = stripLeadingTagBlock(input_str, 'Analyze');
+    input_str = stripOuterTagBlock(input_str, 'json_?patch');
+
+    const parsed = parseString(input_str);
+    if (!isJsonPatch(parsed)) {
+        return null;
+    }
+    return JSON.stringify(parsed, null, 2);
+}
+
+function formatJsonPatchUpdate(analysis: unknown, json_patch: string): string {
+    return [
+        '<UpdateVariable>',
+        '<Analyze>',
+        typeof analysis === 'string' ? analysis : '',
+        '</Analyze>',
+        '<JSONPatch>',
+        json_patch,
+        '</JSONPatch>',
+        '</UpdateVariable>',
+    ].join('\n');
 }
 
 export function extractFromToolCall(tool_calls: ToolCallBatches | undefined): string | null {
@@ -278,13 +450,11 @@ export function extractFromToolCall(tool_calls: ToolCallBatches | undefined): st
             // 主要有两种情况， llm加了 <json_patch> 和没有加的情况，所以下面是try，解码错误的时候fallback一下。
             const json_patch_match = /json_?patch/i.test(json.delta);
             try {
-                const parsed = parseString(
-                    json.delta.replaceAll(/```.*/gm, '').replaceAll(/<\/?json_?patch>/gim, '')
-                );
-                if (!isJsonPatch(parsed)) {
+                const json_patch = normalizeJsonPatchPayload(json.delta);
+                if (!json_patch) {
                     throw new Error(`不是有效的 json patch`);
                 }
-                json.delta = JSON.stringify(parsed, null, 2);
+                json.delta = json_patch;
                 result += `<JSONPatch>\n${json.delta}\n</JSONPatch>\n`;
             } catch (error) {
                 if (json_patch_match) {
@@ -311,4 +481,36 @@ export function extractFromToolCall(tool_calls: ToolCallBatches | undefined): st
         console.log(`[MVU额外模型解析]函数调用结果解析失败, ${e}`);
     }
     return null;
+}
+
+export function extractFromFormattedOutput(result: string | GenerateToolCallResult): string | null {
+    const content = typeof result === 'string' ? result : result.content;
+    if (!content) {
+        return null;
+    }
+
+    try {
+        const parsed = parseString(cleanStructuredPayload(content));
+        const patch_source = isJsonPatch(parsed)
+            ? parsed
+            : (_.get(parsed, 'json_patch') ??
+              _.get(parsed, 'jsonPatch') ??
+              _.get(parsed, 'patch') ??
+              _.get(parsed, 'delta'));
+        const json_patch = normalizeJsonPatchPayload(patch_source);
+        if (!json_patch) {
+            throw new Error('不是有效的 json patch');
+        }
+        const analysis = isJsonPatch(parsed)
+            ? ''
+            : (_.get(parsed, 'analysis') ?? _.get(parsed, 'analyze') ?? '');
+        return formatJsonPatchUpdate(analysis, json_patch);
+    } catch (error) {
+        console.error(`[MVU额外模型解析]格式化输出解析失败。 ${content}, 错误 ${error}`);
+        return null;
+    }
+}
+
+export function extractFromGenerateToolCallResult(result: GenerateToolCallResult): string | null {
+    return extractFromToolCall([result.tool_calls]);
 }

@@ -8,6 +8,8 @@ import { useDataStore } from '@/store';
 import { getLastValidMessageId, getLastValidVariable } from '@/util';
 import { MvuData } from '@/variable_def';
 import { klona } from 'klona';
+import { watch } from 'vue';
+import { ScriptButton } from '../slash-runner/src/type/scripts';
 
 /**
  * 递归更新描述字段
@@ -397,11 +399,11 @@ export const buttons: Button[] = [
                 );
                 return;
             } else if (
-                store.settings.额外模型解析配置.使用函数调用 &&
+                store.settings.额外模型解析配置.应答格式 === '工具调用' &&
                 !isFunctionCallingSupported()
             ) {
                 toastr.info(
-                    `当前配置指定的LLM不支持函数调用，请调整额外模型解析设置`,
+                    `当前 TavernHelper 版本或配置指定的 LLM 不支持工具调用，请调整额外模型解析设置`,
                     '[MVU]重试额外模型解析',
                     {
                         timeOut: 3000,
@@ -529,11 +531,47 @@ export const buttons: Button[] = [
     },
 ];
 
+let prev_states: ScriptButton[] = [];
+
 export function initButtons() {
     appendInexistentScriptButtons(buttons.map(button => ({ name: button.name, visible: false })));
     buttons.forEach(button => {
         eventOn(getButtonEvent(button.name), button.function);
     });
 
-    return () => {};
+    prev_states = _.intersectionBy(getScriptButtons(), buttons, button => button.name);
+    const stop = watch(
+        () => useDataStore().should_enable,
+        should_enable => {
+            const current_buttons = getScriptButtons();
+            if (should_enable) {
+                replaceScriptButtons(
+                    _(current_buttons)
+                        .differenceBy(prev_states, button => button.name)
+                        .concat(prev_states)
+                        .value()
+                );
+                return;
+            }
+            const existing_buttons = _.intersectionBy(
+                current_buttons,
+                buttons,
+                button => button.name
+            );
+            prev_states = klona(existing_buttons);
+            existing_buttons.forEach(button => (button.visible = false));
+            replaceScriptButtons(current_buttons);
+        }
+    );
+
+    return () => {
+        const current_buttons = getScriptButtons();
+        replaceScriptButtons(
+            _(current_buttons)
+                .differenceBy(prev_states, button => button.name)
+                .concat(prev_states)
+                .value()
+        );
+        stop();
+    };
 }

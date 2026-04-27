@@ -200,11 +200,17 @@ interface Command {
     reason: string;
 }
 
+function jsonPatchPathToCommandPath(path: string | undefined): string {
+    if (!path) return '';
+    const pathWithoutRoot = path.startsWith('/') ? path.substring(1) : path;
+    return pathWithoutRoot.replace(/\//g, '.');
+}
+
 function extractJsonPatch(patch: any): Command[] {
     const translated_commands: Command[] = [];
 
     for (const op of patch) {
-        const path = (op.path ?? op.to).substring(1).replace(/\//g, '.');
+        const path = jsonPatchPathToCommandPath(op.path ?? op.to);
         switch (op.op) {
             case 'replace':
                 translated_commands.push({
@@ -228,6 +234,7 @@ function extractJsonPatch(patch: any): Command[] {
                 const pathParts = _.toPath(path);
                 const lastPart = pathParts[pathParts.length - 1];
                 const containerPath = pathParts.slice(0, -1).join('.');
+                // 保留 JSON Patch 的 "-" 特殊 token，交给执行阶段结合目标集合类型解释。
                 const keyOrIndexArg = /^\d+$/.test(lastPart) ? lastPart : `'${lastPart}'`;
                 translated_commands.push({
                     type: 'insert',
@@ -249,7 +256,7 @@ function extractJsonPatch(patch: any): Command[] {
                 translated_commands.push({
                     type: 'move',
                     full_match: JSON.stringify(op),
-                    args: [(op as any).from.substring(1).replace(/\//g, '.'), path],
+                    args: [jsonPatchPathToCommandPath((op as any).from), path],
                     reason: 'json_patch',
                 });
                 break;
@@ -978,16 +985,23 @@ export async function updateVariables(
                             ? targetSchema.template
                             : undefined;
 
-                    if (Array.isArray(collection) && typeof keyOrIndex === 'number') {
+                    if (
+                        Array.isArray(collection) &&
+                        (typeof keyOrIndex === 'number' || keyOrIndex === '-')
+                    ) {
                         // 目标是数组且索引是数字，插入到指定位置
+                        // JSON Patch 中的 "-" 表示追加到数组末尾，而不是字面量键名。
+                        const insertIndex = keyOrIndex === '-' ? collection.length : keyOrIndex;
+                        const positionLabel =
+                            keyOrIndex === '-' || keyOrIndex === -1 ? 'tail' : keyOrIndex;
                         valueToAssign = applyTemplate(
                             valueToAssign,
                             template,
                             strict_template,
                             concat_template_array
                         );
-                        collection.splice(keyOrIndex, 0, valueToAssign);
-                        display_str = `ASSIGNED ${JSON.stringify(valueToAssign)} into '${path}' at index ${keyOrIndex} ${reason_str}`;
+                        collection.splice(insertIndex, 0, valueToAssign);
+                        display_str = `ASSIGNED ${JSON.stringify(valueToAssign)} into '${path}' at index ${positionLabel} ${reason_str}`;
                         successful = true;
                     } else if (_.isObject(collection)) {
                         // 目标是对象，设置指定键

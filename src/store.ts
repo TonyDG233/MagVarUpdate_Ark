@@ -1,7 +1,12 @@
-import { is_jest_environment } from '@/util';
+import { is_jest_environment } from '@/jest';
+import { registerAsUniqueScript } from '@util/script';
 import { defineStore } from 'pinia';
 import { ref, toRaw, watch } from 'vue';
 import * as z from 'zod';
+
+export const EXTRA_MODEL_RESPONSE_FORMATS = ['聊天消息', '工具调用', '格式化输出'] as const;
+
+const ExtraModelResponseFormat = z.enum(EXTRA_MODEL_RESPONSE_FORMATS);
 
 const OldSettings = z
     .object({
@@ -51,6 +56,7 @@ const OldSettings = z
                 ...data.额外模型解析配置,
                 破限方案: data.额外模型解析配置.发送预设 ? '使用当前预设' : '使用内置破限',
                 启用自动请求: data.自动触发额外模型解析,
+                应答格式: data.额外模型解析配置.使用函数调用 ? '工具调用' : '聊天消息',
             },
             自动清理变量: {
                 ...data.auto_cleanup,
@@ -80,8 +86,12 @@ const NewSettings = z
         更新方式: z.enum(['随AI输出', '额外模型解析']).default('随AI输出'),
         额外模型解析配置: z
             .object({
-                破限方案: z.enum(['使用内置破限', '使用当前预设']).default('使用内置破限'),
-                使用函数调用: z.boolean().default(false),
+                破限方案: z
+                    .enum(['使用内置破限', '使用当前预设', '使用其他预设'])
+                    .default('使用内置破限'),
+                其他预设名称: z.string().default(''),
+                使用函数调用: z.boolean().optional(),
+                应答格式: ExtraModelResponseFormat.optional(),
                 兼容假流式: z.boolean().default(false),
 
                 启用自动请求: z.boolean().default(true),
@@ -123,6 +133,10 @@ const NewSettings = z
                     .default(4096)
                     .transform(value => Math.max(0, value)),
             })
+            .transform(({ 使用函数调用, 应答格式, ...data }) => ({
+                ...data,
+                应答格式: 应答格式 ?? (使用函数调用 ? '工具调用' : '聊天消息'),
+            }))
             .prefault({}),
         自动清理变量: z
             .object({
@@ -185,6 +199,9 @@ export const useDataStore = defineStore('MVU变量框架', () => {
         },
         { deep: true }
     );
+    const _reload_settings = () => {
+        settings.value = Settings.parse(_.get(SillyTavern.extensionSettings, 'mvu_settings', {}));
+    };
 
     const runtimes = ref(Runtimes.parse({}));
     watch(
@@ -208,5 +225,25 @@ export const useDataStore = defineStore('MVU变量框架', () => {
         versions.value.tavernhelper = await getTavernHelperVersion();
     };
 
-    return { settings, runtimes, versions, resetRuntimes, _wait_init };
+    const should_enable = ref<boolean>(false);
+    watch(should_enable, (new_enable, old_enable) => {
+        if (new_enable && !old_enable) {
+            _reload_settings();
+        }
+    });
+
+    // 当存在多个 MVU 脚本实例时，仅优先实例应启用运行逻辑。
+    registerAsUniqueScript('MVU变量框架').listenPreferenceState(preferred_script_id => {
+        should_enable.value = preferred_script_id === getScriptId();
+    });
+
+    return {
+        settings,
+        _reload_settings,
+        runtimes,
+        resetRuntimes,
+        versions,
+        _wait_init,
+        should_enable,
+    };
 });

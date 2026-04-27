@@ -63,7 +63,6 @@ describe('JSON Patch fixtures', () => {
         const statData = _.cloneDeep(testCase.doc);
         const schema = generateSchema(_.cloneDeep(testCase.doc));
         relaxSchema(schema);
-        if (_label.includes('16')) return; //对于 A16. 场景，不支持符号 - 的特殊含义
 
         const variables: MvuData = {
             stat_data: statData,
@@ -132,5 +131,68 @@ describe('执行测试', () => {
         await updateVariables(message, variables);
 
         expect(variables.stat_data).toEqual({ 测试: 20 });
+    });
+
+    test('json patch insert with /- appends to array tail', async () => {
+        const statData = {
+            主角: {
+                持有物品: [{ name: '木钥匙' }, { name: '银钥匙' }],
+            },
+        };
+        const schema = generateSchema(_.cloneDeep(statData));
+        relaxSchema(schema);
+
+        const variables: MvuData = {
+            stat_data: statData,
+            display_data: {},
+            delta_data: {},
+            schema: schema as any,
+        };
+
+        const message =
+            '<JsonPatch>[{"op":"insert","path":"/主角/持有物品/-","value":{"name":"铜钥匙","description":"古铜色小钥匙"}}]</JsonPatch>';
+
+        await updateVariables(message, variables);
+
+        expect(variables.stat_data.主角.持有物品).toEqual([
+            { name: '木钥匙' },
+            { name: '银钥匙' },
+            { name: '铜钥匙', description: '古铜色小钥匙' },
+        ]);
+    });
+
+    test('json patch insert tolerates missing leading root slash', async () => {
+        const statData = {
+            主角: {
+                备忘录: {},
+            },
+        };
+        const schema = generateSchema(_.cloneDeep(statData));
+        relaxSchema(schema);
+
+        const variables: MvuData = {
+            stat_data: statData,
+            display_data: {},
+            delta_data: {},
+            schema: schema as any,
+        };
+
+        const message = `<JSONPatch>
+[
+  { "op": "insert", "path": "主角/备忘录/楼道露出任务", "value": "Day1 22:00-23:30 在月光里公寓区消防楼梯间完成露出任务" }
+]
+</JSONPatch>`;
+
+        await updateVariables(message, variables);
+
+        expect(variables.stat_data).toEqual({
+            主角: {
+                备忘录: {
+                    楼道露出任务:
+                        'Day1 22:00-23:30 在月光里公寓区消防楼梯间完成露出任务',
+                },
+            },
+        });
+        expect(variables.stat_data).not.toHaveProperty('角');
     });
 });
